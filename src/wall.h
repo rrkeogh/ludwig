@@ -5,10 +5,8 @@
  *  Edinburgh Soft Matter and Statistical Physics Group and
  *  Edinburgh Parallel Computing Centre
  *
- *  (c) 2011-2017 The University of Edinburgh
- *
- *  Contributing authors:
  *  Kevin Stratford (kevin@epcc.ed.ac.uk)
+ *  (c) 2011-2016 The University of Edinburgh
  *
  *****************************************************************************/
 
@@ -28,6 +26,7 @@ struct wall_param_s {
   int iswall;           /* Flag for flat walls */
   int isporousmedia;    /* Flag for porous media */
   int isboundary[3];    /* X, Y, Z boundary markers */
+  int isslip[3];      /* X, Y, Z boundary markers */
   int initshear;        /* Use shear initialisation of distributions */
   double ubot[3];       /* 'Botttom' wall motion */
   double utop[3];       /* 'Top' wall motion */
@@ -39,12 +38,12 @@ __host__ int wall_create(pe_t * pe, cs_t * cs, map_t * map, lb_t * lb,
 			 wall_t ** p);
 __host__ int wall_free(wall_t * wall);
 __host__ int wall_info(wall_t * wall);
-__host__ int wall_commit(wall_t * wall, wall_param_t * values);
+__host__ int wall_commit(wall_t * wall, wall_param_t values);
 __host__ int wall_target(wall_t * wall, wall_t ** target);
 __host__ int wall_param(wall_t * wall, wall_param_t * param);
-__host__ int wall_param_set(wall_t * wall, wall_param_t * values);
+__host__ int wall_param_set(wall_t * wall, wall_param_t values);
 __host__ int wall_shear_init(wall_t * wall);
-__host__ int wall_memcpy(wall_t * wall, tdpMemcpyKind flag);
+__host__ int wall_memcpy(wall_t * wall, int flag);
 
 __host__ int wall_bbl(wall_t * wall);
 __host__ int wall_set_wall_distributions(wall_t * wall);

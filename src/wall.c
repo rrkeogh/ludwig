@@ -9,9 +9,7 @@
  *  Edinburgh Soft Matter and Statistical Physics and
  *  Edinburgh Parallel Computing Centre
  *
- *  (c) 2011-2020 The University of Edinburgh
- *
- *  Contributing authors:
+ *  (c) 2011-2016 The University of Edinburgh
  *  Kevin Stratford (kevin@epcc.ed.ac.uk)
  *
  *****************************************************************************/
@@ -40,7 +38,7 @@ struct wall_s {
   pe_t * pe;             /* Parallel environment */
   cs_t * cs;             /* Reference to coordinate system */
   map_t * map;           /* Reference to map structure */
-  lb_t * lb;             /* Reference to LB information */ 
+  lb_t * lb;             /* Reference to LB information */
   wall_t * target;       /* Device memory */
 
   wall_param_t * param;  /* parameters */
@@ -49,6 +47,7 @@ struct wall_s {
   int * linkj;           /* inside (solid) site indices */
   int * linkp;           /* LB basis vectors for links */
   int * linku;           /* Link wall_uw_enum_t (wall velocity) */
+	int * links;           /* flag inside (solid) site indices are slip or no-slip RYAN EDIT*/
   double fnet[3];        /* Momentum accounting for source/sink walls */
 };
 
@@ -78,7 +77,6 @@ __host__ int wall_create(pe_t * pe, cs_t * cs, map_t * map, lb_t * lb,
   assert(p);
 
   wall = (wall_t *) calloc(1, sizeof(wall_t));
-  assert(wall);
   if (wall == NULL) pe_fatal(pe, "calloc(wall_t) failed\n");
 
   wall->param = (wall_param_t *) calloc(1, sizeof(wall_param_t));
@@ -93,7 +91,7 @@ __host__ int wall_create(pe_t * pe, cs_t * cs, map_t * map, lb_t * lb,
 
   /* Target copy */
 
-  tdpGetDeviceCount(&ndevice);
+  targetGetDeviceCount(&ndevice);
 
   if (ndevice == 0) {
     wall->target = wall;
@@ -101,11 +99,9 @@ __host__ int wall_create(pe_t * pe, cs_t * cs, map_t * map, lb_t * lb,
   else {
     wall_param_t * tmp = NULL;
 
-    tdpMalloc((void **) &wall->target, sizeof(wall_t));
-    tdpMemset(wall->target, 0, sizeof(wall_t));
-    tdpGetSymbolAddress((void **) &tmp, tdpSymbol(static_param));
-    tdpMemcpy(&wall->target->param, &tmp, sizeof(wall_param_t *),
-	      tdpMemcpyHostToDevice);
+    targetCalloc((void **) &wall->target, sizeof(wall_t));
+    targetConstAddress((void **) &tmp, static_param);
+    copyToTarget(&wall->target->param, &tmp, sizeof(wall_param_t *));
   }
 
   *p = wall;
@@ -125,19 +121,17 @@ __host__ int wall_free(wall_t * wall) {
 
   if (wall->target != wall) {
     int * tmp;
-    tdpMemcpy(&tmp, &wall->target->linki, sizeof(int *),
-	      tdpMemcpyDeviceToHost);
-    tdpFree(tmp);
-    tdpMemcpy(&tmp, &wall->target->linkj, sizeof(int *),
-	      tdpMemcpyDeviceToHost);
-    tdpFree(tmp);
-    tdpMemcpy(&tmp, &wall->target->linkp, sizeof(int *),
-	      tdpMemcpyDeviceToHost);
-    tdpFree(tmp);
-    tdpMemcpy(&tmp, &wall->target->linku, sizeof(int *),
-	      tdpMemcpyDeviceToHost);
-    tdpFree(tmp);
-    tdpFree(wall->target);
+    copyFromTarget(&tmp, &wall->target->linki, sizeof(int *));
+    targetFree(tmp);
+    copyFromTarget(&tmp, &wall->target->linkj, sizeof(int *));
+    targetFree(tmp);
+    copyFromTarget(&tmp, &wall->target->linkp, sizeof(int *));
+    targetFree(tmp);
+    copyFromTarget(&tmp, &wall->target->linku, sizeof(int *));
+    targetFree(tmp);
+		copyFromTarget(&tmp, &wall->target->links, sizeof(int *));		/*RYAN EDIT*/
+    targetFree(tmp);
+    targetFree(wall->target);
   }
 
   cs_free(wall->cs);
@@ -146,6 +140,7 @@ __host__ int wall_free(wall_t * wall) {
   if (wall->linkj) free(wall->linkj);
   if (wall->linkp) free(wall->linkp);
   if (wall->linku) free(wall->linku);
+	if (wall->links) free(wall->links);								/*RYAN EDIT*/
   free(wall);
 
   return 0;
@@ -157,12 +152,11 @@ __host__ int wall_free(wall_t * wall) {
  *
  *****************************************************************************/
 
-__host__ int wall_commit(wall_t * wall, wall_param_t * param) {
+__host__ int wall_commit(wall_t * wall, wall_param_t param) {
 
   assert(wall);
-  assert(param);
 
-  *wall->param = *param;
+  *wall->param = param;
 
   wall_init_map(wall);
   wall_init_boundaries(wall, WALL_INIT_COUNT_ONLY);
@@ -170,7 +164,7 @@ __host__ int wall_commit(wall_t * wall, wall_param_t * param) {
   wall_init_uw(wall);
 
   /* As we have initialised the map on the host, ... */
-  map_memcpy(wall->map, tdpMemcpyHostToDevice);
+  map_memcpy(wall->map, cudaMemcpyHostToDevice);
 
   return 0;
 }
@@ -204,6 +198,11 @@ __host__ int wall_info(wall_t * wall) {
 	    (wall->param->isboundary[X] == 1) ? "X" : "-",
 	    (wall->param->isboundary[Y] == 1) ? "Y" : "-",
 	    (wall->param->isboundary[Z] == 1) ? "Z" : "-");
+		pe_info(pe, "--------------\n");
+	   pe_info(pe, "Slip walls:                  %1s %1s %1s\n",
+		   (wall->param->isslip[X] == 1) ? "X" : "-",
+		   (wall->param->isslip[Y] == 1) ? "Y" : "-",
+		   (wall->param->isslip[Z] == 1) ? "Z" : "-");
     pe_info(pe, "Boundary speed u_x (bottom):    %14.7e\n",
 	    wall->param->ubot[X]);
     pe_info(pe, "Boundary speed u_x (top):       %14.7e\n",
@@ -211,8 +210,8 @@ __host__ int wall_info(wall_t * wall) {
     pe_info(pe, "Boundary normal lubrication rc: %14.7e\n",
 	    wall->param->lubr_rc[X]);
 
-    pe_info(pe, "Wall boundary links allocated:   %d\n",  nlink);
-    pe_info(pe, "Memory (total, bytes):           %zu\n", 4*nlink*sizeof(int));
+    pe_info(pe, "Wall boundary links allocated:   %d\n", nlink);
+    pe_info(pe, "Memory (total, bytes):           %d\n", 4*nlink*sizeof(int));
     pe_info(pe, "Boundary shear initialise:       %d\n",
 	    wall->param->initshear);
   }
@@ -221,8 +220,8 @@ __host__ int wall_info(wall_t * wall) {
     pe_info(pe, "\n");
     pe_info(pe, "Porous Media\n");
     pe_info(pe, "------------\n");
-    pe_info(pe, "Wall boundary links allocated:   %d\n",  nlink);
-    pe_info(pe, "Memory (total, bytes):           %zu\n", 4*nlink*sizeof(int));
+    pe_info(pe, "Wall boundary links allocated:   %d\n", nlink);
+    pe_info(pe, "Memory (total, bytes):           %d\n", 4*nlink*sizeof(int));
   }
 
   return 0;
@@ -250,12 +249,11 @@ __host__ int wall_target(wall_t * wall, wall_t ** target) {
  *
  *****************************************************************************/
 
-__host__ int wall_param_set(wall_t * wall, wall_param_t * values) {
+__host__ int wall_param_set(wall_t * wall, wall_param_t values) {
 
   assert(wall);
-  assert(values);
 
-  *wall->param = *values;
+  *wall->param = values;
 
   return 0;
 }
@@ -290,7 +288,9 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 
   int ic, jc, kc;
   int ic1, jc1, kc1;
-  int indexi, indexj;
+	int ic2, jc2, kc2;
+	int isslip;
+  int indexi, indexj, indexjPrime;
   int p;
   int nlink;
   int nlocal[3];
@@ -299,37 +299,36 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 
   assert(wall);
 
-  tdpGetDeviceCount(&ndevice);
+  targetGetDeviceCount(&ndevice);
 
   if (init == WALL_INIT_ALLOCATE) {
-    nlink = imax(1, wall->nlink); /* Avoid zero-sized allocations */
-    assert(nlink > 0);
-    wall->linki = (int *) calloc(nlink, sizeof(int));
-    wall->linkj = (int *) calloc(nlink, sizeof(int));
-    wall->linkp = (int *) calloc(nlink, sizeof(int));
-    wall->linku = (int *) calloc(nlink, sizeof(int));
-    assert(wall->linki);
-    assert(wall->linkj);
-    assert(wall->linkp);
-    assert(wall->linku);
-    if (wall->linki == NULL) pe_fatal(wall->pe,"calloc(wall->linki) failed\n");
+    wall->linki = (int *) calloc(wall->nlink, sizeof(int));
+    wall->linkj = (int *) calloc(wall->nlink, sizeof(int));
+    wall->linkp = (int *) calloc(wall->nlink, sizeof(int));
+    wall->linku = (int *) calloc(wall->nlink, sizeof(int));
+		wall->links = (int *) calloc(wall->nlink, sizeof(int));				/*RYAN EDIT*/
+		assert(wall->linki);
+		assert(wall->linkj);
+		assert(wall->linkp);
+		assert(wall->linku);
+		assert(wall->links);
+	  if (wall->linki == NULL) pe_fatal(wall->pe,"calloc(wall->linki) failed\n");
     if (wall->linkj == NULL) pe_fatal(wall->pe,"calloc(wall->linkj) failed\n");
     if (wall->linkp == NULL) pe_fatal(wall->pe,"calloc(wall->linkp) failed\n");
     if (wall->linku == NULL) pe_fatal(wall->pe,"calloc(wall->linku) failed\n");
+		if (wall->links == NULL) pe_fatal(wall->pe,"calloc(wall->links) failed\n");		/*RYAN EDIT*/
     if (ndevice > 0) {
       int tmp;
-      tdpMalloc((void **) &tmp, wall->nlink*sizeof(int));
-      tdpMemcpy(&wall->target->linki, &tmp, sizeof(int *),
-		tdpMemcpyHostToDevice);
-      tdpMalloc((void **) &tmp, wall->nlink*sizeof(int));
-      tdpMemcpy(&wall->target->linkj, &tmp, sizeof(int *),
-		tdpMemcpyHostToDevice);
-      tdpMalloc((void **) &tmp, wall->nlink*sizeof(int));
-      tdpMemcpy(&wall->target->linkp, &tmp, sizeof(int *),
-		tdpMemcpyHostToDevice);
-      tdpMalloc((void **) &tmp, wall->nlink*sizeof(int));
-      tdpMemcpy(&wall->target->linku, &tmp, sizeof(int *),
-		tdpMemcpyHostToDevice);
+      targetMalloc((void **) &tmp, wall->nlink*sizeof(int));
+      copyToTarget(&wall->target->linki, &tmp, sizeof(int *));
+      targetMalloc((void **) &tmp, wall->nlink*sizeof(int));
+      copyToTarget(&wall->target->linkj, &tmp, sizeof(int *));
+      targetMalloc((void **) &tmp, wall->nlink*sizeof(int));
+      copyToTarget(&wall->target->linkp, &tmp, sizeof(int *));
+      targetMalloc((void **) &tmp, wall->nlink*sizeof(int));
+      copyToTarget(&wall->target->linku, &tmp, sizeof(int *));
+			targetMalloc((void **) &tmp, wall->nlink*sizeof(int));
+      copyToTarget(&wall->target->links, &tmp, sizeof(int *));			/*RYAN EDIT*/
     }
   }
 
@@ -351,15 +350,139 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 	  ic1 = ic + cv[p][X];
 	  jc1 = jc + cv[p][Y];
 	  kc1 = kc + cv[p][Z];
-	  indexj = cs_index(wall->cs, ic1, jc1, kc1);
-	  map_status(wall->map, indexj, &status);
+	  indexjPrime = cs_index(wall->cs, ic1, jc1, kc1);
+	  map_status(wall->map, indexjPrime, &status);
 
 	  if (status == MAP_BOUNDARY) {
+			isslip = 0;
+			ic2 = ic1;
+			jc2 = jc1;
+			kc2 = kc1;
+			if ( wall->param->isslip[0] && ( ic == 1 || ic == nlocal[X] ) ){			//Perfect slip on x-walls
+				isslip = 1;
+				if (ic == 1) ic2 = 0;																								//Set ic2 for LEFT WALL
+				else if (ic == nlocal[X]) ic2 = nlocal[X] + 1;											//Set ic2 for RIGHT WALL
+
+				if ( jc > 1 && jc < nlocal[Y] && kc > 1 && kc < nlocal[Z] ){				//General case for non-edges on x-walls
+					jc2 = jc;
+					kc2 = kc;
+				}
+				else if ( jc == nlocal[Y] ){																				//Top left & right edges
+					jc2 = jc1;
+					kc2 = kc;
+					if ( p == 14 || p == 1) isslip = 0;																//If link -> edge, do bounceback
+				}
+				else if ( jc == 1 ){																								//Bottom left & right edges
+					jc2 = jc1;
+					kc2 = kc;
+					if ( p == 18 || p == 5 ) isslip = 0;
+				}
+				else if ( kc == nlocal[Z] ){																				//Front left & right edges
+					jc2 = jc;
+					kc2 = kc1;
+					if ( p == 15 || p == 2) isslip = 0;
+				}
+				else if ( kc == 1 ){																								//Back left & right edges
+					jc2 = jc;
+					kc2 = kc1;
+					if ( p == 17 || p == 4 ) isslip = 0;
+				}
+
+				if ( wall->param->isboundary[Y] == 0 ){															//y-walls are PBC
+					if ( ( jc == 1 || jc == nlocal[Y] ) && ( kc > 1 && kc < nlocal[Z] ) ) isslip = 1;
+				}
+
+				else if ( wall->param->isboundary[Z] == 0 ){												//z-walls are PBC
+					if ( ( kc == 1 || kc == nlocal[Z] ) && ( jc > 1 && jc < nlocal[Y] ) ) isslip = 1;
+				}
+			}
+
+			if ( wall->param->isslip[1] && ( jc == 1 || jc == nlocal[Y] ) ){			//Perfect slip on y-walls
+				isslip = 2;
+				if ( jc == 1 ) jc2 = 0;																							//Set jc2 for BOTTOM WALL
+				else if ( jc == nlocal[Y] ) jc2 = nlocal[Y]+1;											//Set jc2 for TOP WALL
+
+				if ( ic > 1 && ic < nlocal[X] && kc > 1 && kc < nlocal[Z] ){				//General case for non-edges on y-walls
+					ic2 = ic;
+					kc2 = kc;
+				}
+				else if ( ic == 1 ){																								//Top & bottom left edge
+					ic2 = ic1;
+					kc2 = kc;
+					if ( p == 14 || p == 18 ) isslip = 0;
+				}
+				else if ( ic == nlocal[X] ){																				//Top & bottom right edg
+					ic2 = ic1;
+					kc2 = kc;
+					if ( p == 1 || p == 5 ) isslip = 0;
+				}
+				else if ( kc == 1 ){																								//Top & bottom back edge
+					ic2 = ic;
+					kc2 = kc1;
+					if ( p == 8 || p == 13 ) isslip = 0;
+				}
+				else if ( kc == nlocal[Z] ){																				//Top & bottom front edge
+					ic2 = ic;
+					kc2 = kc1;
+					if ( p == 11 || p == 6 ) isslip = 0;
+				}
+
+				if ( wall->param->isboundary[X] == 0 ){															//x-walls are PBC
+					if ( ( ic == 1 || ic == nlocal[X] ) && ( kc > 1 && kc < nlocal[Z] ) ) isslip = 2;
+				}
+
+			 	else if ( wall->param->isboundary[Z] == 0 ){												//z-walls are PBC
+					if ( ( kc == 1 || kc == nlocal[Z] ) && ( ic > 1 && ic < nlocal[X] ) ) isslip = 2;
+				}
+			}
+
+			if ( wall->param->isslip[2] && ( kc == 1 || kc == nlocal[Z] ) ){			//Perfect slip on z-walls
+				isslip = 3;
+				if ( kc == 1 ) kc2 = 0;																							//Set kc2 for BACK WALL
+				else if ( kc == nlocal[Z] ) kc2 = nlocal[Z] + 1;										//Set kc2 for FRONT WALL
+
+				if ( ic > 1 && ic < nlocal[X] && jc > 1 && jc < nlocal[Y] ){				//General case for non-edges on z-walls
+					ic2 = ic;
+					jc2 = jc;
+				}
+				else if ( ic == 1 ){																								//Front & back left edges
+					ic2 = ic1;
+					jc2 = jc;
+					if ( p == 15 || p == 17 ) isslip = 0;
+				}
+				else if ( ic == nlocal[X] ){																				//Front & back right edges
+					ic2 = ic1;
+					jc2 = jc;
+					if ( p == 2 || p == 4 ) isslip = 0;
+				}
+				else if ( jc == 1 ){																								//Front & back bottom edges
+					ic2 = ic;
+					jc2 = jc1;
+					if ( p == 13 || p == 11) isslip = 0;
+				}
+				else if ( jc == nlocal[Y] ){																				//Front & back top edges
+					ic2 = ic;
+					jc2 = jc1;
+					if ( p == 8 || p == 6 ) isslip = 0;
+				}
+
+				if ( wall->param->isboundary[X] == 0 ){															//x-walls are PBC
+					if ( ( ic == 1 || ic == nlocal[X] ) && ( jc > 1 && jc < nlocal[Y] ) ) isslip = 3;
+				}
+
+				else if ( wall->param->isboundary[Y] == 0 ){												//y-walls are PBC
+					if ( ( jc == 1 || jc == nlocal[Y] ) && ( ic > 1 && ic < nlocal[X] ) ) isslip = 3;
+				}
+			}
+
+			indexj = cs_index(wall->cs, ic2, jc2, kc2);
+
 	    if (init == WALL_INIT_ALLOCATE) {
 	      wall->linki[nlink] = indexi;
 	      wall->linkj[nlink] = indexj;
 	      wall->linkp[nlink] = p;
 	      wall->linku[nlink] = WALL_UZERO;
+				wall->links[nlink] = isslip;							/*RYAN EDIT*/
 	    }
 	    nlink += 1;
 	  }
@@ -372,7 +495,7 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 
   if (init == WALL_INIT_ALLOCATE) {
     assert(nlink == wall->nlink);
-    wall_memcpy(wall, tdpMemcpyHostToDevice);
+    wall_memcpy(wall, cudaMemcpyHostToDevice);
   }
   wall->nlink = nlink;
 
@@ -385,13 +508,13 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
  *
  *****************************************************************************/
 
-__host__ int wall_memcpy(wall_t * wall, tdpMemcpyKind flag) {
+__host__ int wall_memcpy(wall_t * wall, int flag) {
 
   int ndevice;
 
   assert(wall);
 
-  tdpGetDeviceCount(&ndevice);
+  targetGetDeviceCount(&ndevice);
 
   if (ndevice == 0) {
     assert(wall->target == wall);
@@ -404,28 +527,27 @@ __host__ int wall_memcpy(wall_t * wall, tdpMemcpyKind flag) {
     nlink = wall->nlink;
 
     switch (flag) {
-    case tdpMemcpyHostToDevice:
-      tdpMemcpy(&wall->target->nlink, &wall->nlink, sizeof(int), flag);
-      tdpMemcpy(wall->target->fnet, wall->fnet, 3*sizeof(double), flag);
+    case cudaMemcpyHostToDevice:
+      copyToTarget(&wall->target->nlink, &wall->nlink, sizeof(int));
+      copyToTarget(wall->target->fnet, wall->fnet, 3*sizeof(double));
 
       /* In turn, linki, linkj, linkp, linku */
-      tdpMemcpy(&tmp, &wall->target->linki, sizeof(int *),
-		tdpMemcpyDeviceToHost);
-      tdpMemcpy(tmp, wall->linki, nlink*sizeof(int), flag);
+      copyFromTarget(&tmp, &wall->target->linki, sizeof(int *));
+      copyToTarget(tmp, wall->linki, nlink*sizeof(int));
 
-      tdpMemcpy(&tmp, &wall->target->linkj, sizeof(int *),
-		tdpMemcpyDeviceToHost);
-      tdpMemcpy(tmp, wall->linkj, nlink*sizeof(int), flag);
+      copyFromTarget(&tmp, &wall->target->linkj, sizeof(int *));
+      copyToTarget(tmp, wall->linkj, nlink*sizeof(int));
 
-      tdpMemcpy(&tmp, &wall->target->linkp, sizeof(int *),
-		tdpMemcpyDeviceToHost);
-      tdpMemcpy(tmp, wall->linkp, nlink*sizeof(int), flag);
+      copyFromTarget(&tmp, &wall->target->linkp, sizeof(int *));
+      copyToTarget(tmp, wall->linkp, nlink*sizeof(int));
 
-      tdpMemcpy(&tmp, &wall->target->linku, sizeof(int *),
-		tdpMemcpyDeviceToHost);
-      tdpMemcpy(tmp, wall->linku, nlink*sizeof(int), flag);
+      copyFromTarget(&tmp, &wall->target->linku, sizeof(int *));
+      copyToTarget(tmp, wall->linku, nlink*sizeof(int));
+
+			copyFromTarget(&tmp, &wall->target->links, sizeof(int *));
+      copyToTarget(tmp, wall->links, nlink*sizeof(int));					/*RYAN EDIT*/
       break;
-    case tdpMemcpyDeviceToHost:
+    case cudaMemcpyDeviceToHost:
       assert(0); /* Not required */
       break;
     default:
@@ -457,11 +579,9 @@ __host__ int wall_init_uw(wall_t * wall) {
 
   if (nwall == 1) {
     /* All links are either top or bottom */
-    iw = -1;
     if (wall->param->isboundary[X]) iw = X;
     if (wall->param->isboundary[Y]) iw = Y;
     if (wall->param->isboundary[Z]) iw = Z;
-    assert(iw == X || iw == Y || iw == Z);
 
     for (n = 0; n < wall->nlink; n++) {
       if (cv[wall->linkp[n]][iw] == -1) wall->linku[n] = WALL_UWBOT;
@@ -491,16 +611,15 @@ __host__ int wall_set_wall_distributions(wall_t * wall) {
 
   kernel_launch_param(wall->nlink, &nblk, &ntpb);
 
-  tdpLaunchKernel(wall_setu_kernel, nblk, ntpb, 0, 0,
-		  wall->target, wall->lb->target);
+  __host_launch(wall_setu_kernel, nblk, ntpb, wall->target, wall->lb->target);
 
-  tdpDeviceSynchronize();
+  targetDeviceSynchronise();
 
   return 0;
 }
 
 /*****************************************************************************
- *
+ *		RYAN EDIT
  *  wall_setu_kernel
  *
  *  Set distribution at solid sites to reflect the solid body velocity.
@@ -512,20 +631,39 @@ __host__ int wall_set_wall_distributions(wall_t * wall) {
 __global__ void wall_setu_kernel(wall_t * wall, lb_t * lb) {
 
   int n;
-  int p;                   /* Outward going component of link velocity */
-  double fp;               /* f = w_p (rho0 + (1/cs2) u_a c_pa) No sdotq */
-  double ux = 0.0;         /* No initialisation */
   const double rcs2 = 3.0; /* macro? */
 
   assert(wall);
   assert(lb);
 
-  for_simt_parallel(n, wall->nlink, 1) {
+  __target_simt_parallel_for(n, wall->nlink, 1) {
 
-    p = NVEL - wall->linkp[n];
-    fp = lb->param->wv[p]*(lb->param->rho0 + rcs2*ux*lb->param->cv[p][X]);
+		int ij, is;
+    int p;              /* Outward going component of link velocity */
+    double fp;          /* f = w_p (rho0 + (1/cs2) u_a c_pa) No sdotq */
+    double ux = 0.0;    /* PENDING initialisation */
+
+		ij = wall->linkp[n];
+		is = wall->links[n];
+    p = NVEL - ij;
+		if (is == 1){																								/*x-perfect slip condition*/
+			if (ij == 1 || ij == 2 || ij == 4 || ij == 5) p = ij+13;
+			else if (ij == 14|| ij == 15|| ij == 17|| ij == 18) p = ij-13;
+		}
+		else if (is == 2){																							/*y-perfect slip condition*/
+			if (ij == 6 || ij == 8) p = ij+5;
+			else if (ij == 11 || ij ==13) p = ij-5;
+			else if (ij == 1 || ij == 14) p = ij+4;
+			else if (ij == 5 || ij == 18) p = ij-4;
+		}
+		else if (is == 3){																							/*z-perfect slip condition*/
+			if (ij == 2|| ij == 6|| ij == 11|| ij == 15) p = ij+2;
+			else if (ij == 4|| ij == 8|| ij == 13|| ij == 17) p = ij-2;
+			// printf("ij ji: %d \n\t %d\n", ij, ji );
+		}
+
+		fp = lb->param->wv[p]*(lb->param->rho0 + rcs2*ux*lb->param->cv[p][X]);
     lb_f_set(lb, wall->linkj[n], p, LB_RHO, fp);
-
   }
 
   return;
@@ -549,16 +687,14 @@ __host__ int wall_bbl(wall_t * wall) {
   if (wall->nlink == 0) return 0;
 
   /* Update kernel constants */
-  tdpMemcpyToSymbol(tdpSymbol(static_param), wall->param,
-		    sizeof(wall_param_t), 0, tdpMemcpyHostToDevice);
+  copyConstToTarget(&static_param, wall->param, sizeof(wall_param_t));
 
   kernel_launch_param(wall->nlink, &nblk, &ntpb);
 
-  tdpLaunchKernel(wall_bbl_kernel, nblk, ntpb, 0, 0,
-		  wall->target, wall->lb->target, wall->map->target);
+  __host_launch(wall_bbl_kernel, nblk, ntpb, wall->target, wall->lb->target,
+		wall->map->target);
 
-  tdpAssert(tdpPeekAtLastError());
-  tdpAssert(tdpDeviceSynchronize());
+  targetDeviceSynchronise();
 
   return 0;
 }
@@ -576,14 +712,11 @@ __global__ void wall_bbl_kernel(wall_t * wall, lb_t * lb, map_t * map) {
 
   int n;
   int ib;
-  int tid;
-  double fxb, fyb, fzb;
   double uw[WALL_UWMAX][3];
 
   __shared__ double fx[TARGET_MAX_THREADS_PER_BLOCK];
   __shared__ double fy[TARGET_MAX_THREADS_PER_BLOCK];
   __shared__ double fz[TARGET_MAX_THREADS_PER_BLOCK];
-
   const double rcs2 = 3.0;
 
   assert(wall);
@@ -598,86 +731,118 @@ __global__ void wall_bbl_kernel(wall_t * wall, lb_t * lb, map_t * map) {
     uw[WALL_UWBOT][ib] = wall->param->ubot[ib];
   }
 
-  tid = threadIdx.x;
+  __target_simt_parallel_region() {
 
-  fx[tid] = 0.0;
-  fy[tid] = 0.0;
-  fz[tid] = 0.0;
+    int tid;
+    double fxb, fyb, fzb;
 
-  for_simt_parallel(n, wall->nlink, 1) {
+    __target_simt_threadIdx_init();
+    tid = threadIdx.x;
 
-    int i, j, ij, ji, ia;
-    int status;
-    double rho, cdotu;
-    double fp, fp0, fp1;
-    double force;
+    fx[tid] = 0.0;
+    fy[tid] = 0.0;
+    fz[tid] = 0.0;
 
-    i  = wall->linki[n];
-    j  = wall->linkj[n];
-    ij = wall->linkp[n];   /* Link index direction solid->fluid */
-    ji = NVEL - ij;        /* Opposite direction index */
-    ia = wall->linku[n];   /* Wall velocity lookup */
+    __target_simt_for(n, wall->nlink, 1) {
 
-    cdotu = lb->param->cv[ij][X]*uw[ia][X] +
-            lb->param->cv[ij][Y]*uw[ia][Y] +
-            lb->param->cv[ij][Z]*uw[ia][Z]; 
+      int i, j, ij, ji, ia, is;
+      int status;
+      double rho, cdotu;
+      double fp, fp0, fp1;
+      double force;
 
-    map_status(map, i, &status);
+      i  = wall->linki[n];
+      j  = wall->linkj[n];
+      ij = wall->linkp[n];   /* Link index direction solid->fluid */
+      ia = wall->linku[n];   /* Wall velocity lookup */
+			is = wall->links[n];
+			ji = NVEL - ij;        /* Opposite direction index */
 
-    if (status == MAP_COLLOID) {
+			if (is == 1){																								/*x-perfect slip condition*/
+				if (ij == 1 || ij == 2 || ij == 4 || ij == 5) ji = ij+13;
+				else if (ij == 14|| ij == 15|| ij == 17|| ij == 18) ji = ij-13;
+			}
+			else if (is == 2){																							/*y-perfect slip condition*/
+				if (ij == 6 || ij == 8) ji = ij+5;
+				else if (ij == 11 || ij == 13) ji = ij-5;
+				else if (ij == 1 || ij == 14) ji = ij+4;
+				else if (ij == 5 || ij == 18) ji = ij-4;
+			}
+			else if (is == 3){																							/*z-perfect slip condition*/
+				if (ij == 2|| ij == 6|| ij == 11|| ij == 15) ji = ij+2;
+				else if (ij == 4|| ij == 8|| ij == 13|| ij == 17) ji = ij-2;
+			}
 
-      /* This matches the momentum exchange in colloid BBL. */
-      /* This only affects the accounting (via anomaly, as below) */
+      cdotu = lb->param->cv[ij][X]*uw[ia][X] +
+	      			lb->param->cv[ij][Y]*uw[ia][Y] +
+              lb->param->cv[ij][Z]*uw[ia][Z];
 
-      lb_f(lb, i, ij, LB_RHO, &fp0);
-      lb_f(lb, j, ji, LB_RHO, &fp1);
-      fp = fp0 + fp1;
+      map_status(map, i, &status);
 
-      fx[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
-      fy[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
-      fz[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
-    }
-    else {
+      if (status == MAP_COLLOID) {
 
-      /* This is the momentum. To prevent accumulation of round-off
-       * in the running total (fnet_), we subtract the equilibrium
-       * wv[ij]. This is ok for walls where there are exactly
-       * equal and opposite links at each side of the system. */
+	/* This matches the momentum exchange in colloid BBL. */
+	/* This only affects the accounting (via anomaly, as below) */
 
-      lb_f(lb, i, ij, LB_RHO, &fp);
-      lb_0th_moment(lb, i, LB_RHO, &rho);
+	lb_f(lb, i, ij, LB_RHO, &fp0);
+	lb_f(lb, j, ji, LB_RHO, &fp1);
+	fp = fp0 + fp1;
 
-      force = 2.0*fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-
-      fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
-      fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
-      fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
-
-      fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-      lb_f_set(lb, j, ji, LB_RHO, fp);
-
-      if (lb->param->ndist > 1) {
-	/* Order parameter */
-	lb_f(lb, i, ij, LB_PHI, &fp);
-	lb_0th_moment(lb, i, LB_PHI, &rho);
-
-	fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-	lb_f_set(lb, j, ji, LB_PHI, fp);
+	fx[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
+	fy[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
+	fz[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
       }
+      else {
+
+	/* This is the momentum. To prevent accumulation of round-off
+	 * in the running total (fnet_), we subtract the equilibrium
+	 * wv[ij]. This is ok for walls where there are exactly
+	 * equal and opposite links at each side of the system. */
+
+	lb_f(lb, i, ij, LB_RHO, &fp);
+	lb_0th_moment(lb, i, LB_RHO, &rho);
+
+	force = 2.0*fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+	//force -= 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+	if (is == 0) {
+		//force -= 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+		//printf("-- made it to the no-slip walls --\n\n");
+		fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
+		fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
+		fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
+	}
+	else if (is == 1) fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
+	else if (is == 2) fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
+	else if (is == 3) fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
+
+	//else if (is == 3) fz[tid] += 0;
+	fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+	lb_f_set(lb, j, ji, LB_RHO, fp);
+
+	if (lb->param->ndist > 1) {
+	  /* Order parameter */
+	  lb_f(lb, i, ij, LB_PHI, &fp);
+	  lb_0th_moment(lb, i, LB_PHI, &rho);
+
+	  fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+	  lb_f_set(lb, j, ji, LB_PHI, fp);
+	}
+      }
+      /* Next link */
     }
-    /* Next link */
-  }
 
-  /* Reduction for momentum transfer */
+    /* Reduction for momentum transfer */
 
-  fxb = tdpAtomicBlockAddDouble(fx);
-  fyb = tdpAtomicBlockAddDouble(fy);
-  fzb = tdpAtomicBlockAddDouble(fz);
+		fxb = target_block_reduce_sum_double(fx);
+	  fyb = target_block_reduce_sum_double(fy);
+	  fzb = target_block_reduce_sum_double(fz);
 
-  if (tid == 0) {
-    tdpAtomicAddDouble(&wall->fnet[X], fxb);
-    tdpAtomicAddDouble(&wall->fnet[Y], fyb);
-    tdpAtomicAddDouble(&wall->fnet[Z], fzb);
+
+    if (tid == 0) {
+      target_atomic_add_double(&wall->fnet[X], fxb);
+      target_atomic_add_double(&wall->fnet[Y], fyb);
+      target_atomic_add_double(&wall->fnet[Z], fzb);
+    }
   }
 
   return;
@@ -784,17 +949,15 @@ __host__ int wall_momentum(wall_t * wall, double f[3]) {
    * the host via wall_momentum_add() and others are on the
    * device. */
 
-  tdpGetDeviceCount(&ndevice);
+  targetGetDeviceCount(&ndevice);
 
   if (ndevice > 0) {
-    tdpMemcpy(ftmp, wall->target->fnet, 3*sizeof(double),
-	      tdpMemcpyDeviceToHost);
+    copyFromTarget(ftmp, wall->target->fnet, 3*sizeof(double));
     wall->fnet[X] += ftmp[X];
     wall->fnet[Y] += ftmp[Y];
     wall->fnet[Z] += ftmp[Z];
     ftmp[X] = 0.0; ftmp[Y] = 0.0; ftmp[Z] = 0.0;
-    tdpMemcpy(wall->target->fnet, ftmp, 3*sizeof(double),
-	      tdpMemcpyHostToDevice);
+    copyToTarget(wall->target->fnet, ftmp, 3*sizeof(double));
   }
 
   /* Return the current net */
@@ -895,7 +1058,7 @@ __host__ int wall_shear_init(wall_t * wall) {
 
   pe_info(wall->pe, "Initialising linear shear profile for walls\n");
   pe_info(wall->pe, "Speed at top u_x    %14.7e\n", uxtop);
-  pe_info(wall->pe, "Speed at bottom u_x %14.7e\n", uxbottom); 
+  pe_info(wall->pe, "Speed at bottom u_x %14.7e\n", uxbottom);
   pe_info(wall->pe, "Overall shear rate  %14.7e\n", gammadot);
 
   /* Initialise the density, velocity, gradu; ghost modes are zero */
@@ -965,7 +1128,7 @@ __host__ int wall_shear_init(wall_t * wall) {
  *  This operates in parallel by computing the absolute distance between
  *  the side of the system (walls nominally at Lmin and (Lmax + Lmin)),
  *  and applying the cutoff.
- * 
+ *
  *  Normal force is added to the diagonal of drag matrix \zeta^FU_xx etc
  *  (No tangential force would be added to \zeta^FU_xx and \zeta^FU_yy)
  *
@@ -986,7 +1149,7 @@ __host__ int wall_lubr_sphere(wall_t * wall, double ah, const double r[3],
   drag[Y] = 0.0;
   drag[Z] = 0.0;
 
-  if (wall == NULL) return 0;
+  if (wall == NULL) return 0; /* PENDING prefer assert()? */
 
   cs_lmin(wall->cs, lmin);
   cs_ltot(wall->cs, ltot);
@@ -998,7 +1161,7 @@ __host__ int wall_lubr_sphere(wall_t * wall, double ah, const double r[3],
 
   if (wall->param->isboundary[X]) {
     hlub = wall->param->lubr_rc[X];
-    h = r[X] - lmin[X] - ah; 
+    h = r[X] - lmin[X] - ah;
     if (h < hlub) drag[X] = -6.0*pi*eta*ah*ah*(1.0/h - 1.0/hlub);
     h = lmin[X] + ltot[X] - r[X] - ah;
     if (h < hlub) drag[X] = -6.0*pi*eta*ah*ah*(1.0/h - 1.0/hlub);
@@ -1006,7 +1169,7 @@ __host__ int wall_lubr_sphere(wall_t * wall, double ah, const double r[3],
 
   if (wall->param->isboundary[Y]) {
     hlub = wall->param->lubr_rc[Y];
-    h = r[Y] - lmin[Y] - ah; 
+    h = r[Y] - lmin[Y] - ah;
     if (h < hlub) drag[Y] = -6.0*pi*eta*ah*ah*(1.0/h - 1.0/hlub);
     h = lmin[Y] + ltot[Y] - r[Y] - ah;
     if (h < hlub) drag[Y] = -6.0*pi*eta*ah*ah*(1.0/h - 1.0/hlub);
@@ -1014,7 +1177,7 @@ __host__ int wall_lubr_sphere(wall_t * wall, double ah, const double r[3],
 
   if (wall->param->isboundary[Z]) {
     hlub = wall->param->lubr_rc[Z];
-    h = r[Z] - lmin[Z] - ah; 
+    h = r[Z] - lmin[Z] - ah;
     if (h < hlub) drag[Z] = -6.0*pi*eta*ah*ah*(1.0/h - 1.0/hlub);
     h = lmin[Z] + ltot[Z] - r[Z] - ah;
     if (h < hlub) drag[Z] = -6.0*pi*eta*ah*ah*(1.0/h - 1.0/hlub);

@@ -344,50 +344,57 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 	if (status != MAP_FLUID) continue;
 
 	/* Look for non-solid -> solid links */
-
 	for (p = 1; p < NVEL; p++) {
-
+		/* Calculates coordinates for solid nodes */
 	  ic1 = ic + cv[p][X];
 	  jc1 = jc + cv[p][Y];
 	  kc1 = kc + cv[p][Z];
-	  indexjPrime = cs_index(wall->cs, ic1, jc1, kc1);
+
+	  indexjPrime = cs_index(wall->cs, ic1, jc1, kc1); //Calculates temporary indexjPrime (indexjPrime = indexj)
 	  map_status(wall->map, indexjPrime, &status);
 
-	  if (status == MAP_BOUNDARY) {
-			isslip = 0;
-			ic2 = ic1;
+		/* Setting new coordinates ic2, jc2, kc2 for solid sites to capture perfect-slip.		**
+		** New j index for perfect-slip is calculated such that the intermediary solid nodes**
+		** where the distribution is passed from is directly adjacent to origin fluid node  **
+		** This should allow for proper spectral reflection 																*/
+		if (status == MAP_BOUNDARY) {
+			isslip = 0;								//Set flag for bounceback
+			ic2 = ic1;								//Default ic2, jc2, kc2 values are no-slip (ic2 = ic1 etc.)
 			jc2 = jc1;
 			kc2 = kc1;
-			if ( wall->param->isslip[0] && ( ic == 1 || ic == nlocal[X] ) ){			//Perfect slip on x-walls
-				isslip = 1;
-				if (ic == 1) ic2 = 0;																								//Set ic2 for LEFT WALL
-				else if (ic == nlocal[X]) ic2 = nlocal[X] + 1;											//Set ic2 for RIGHT WALL
 
-				if ( jc > 1 && jc < nlocal[Y] && kc > 1 && kc < nlocal[Z] ){				//General case for non-edges on x-walls
-					jc2 = jc;
-					kc2 = kc;
+			/* Redefining ic2, jc2, kc2 for perfect-slip on walls in the x-direction */
+			if ( wall->param->isslip[0] && ( ic == 1 || ic == nlocal[X] ) ){	//if x-walls are slip and for nodes located at the extremes:
+				isslip = 1;																											//Set flag for perfect-slip in x-direction
+				if (ic == 1) ic2 = 0;																						//Set ic2 to for x = 1 to be in the solid domain
+				else if (ic == nlocal[X]) ic2 = nlocal[X] + 1;									//Set ic2 for x = max x to be in the solid domain
+
+				if ( jc > 1 && jc < nlocal[Y] && kc > 1 && kc < nlocal[Z] ){		//General case for non-edges on x-walls
+					jc2 = jc;																											//Set jc2 and kc2 to be same size as fluid domain
+					kc2 = kc;																											//All solid indices should now be directly adjacent to equivalent fluid index
 				}
-				else if ( jc == nlocal[Y] ){																				//Top left & right edges
-					jc2 = jc1;
+				else if ( jc == nlocal[Y] ){																		//Top left & right edges of x-walls
+					jc2 = jc1;																										//Allows for diagonal indices of solid sites at edges
 					kc2 = kc;
-					if ( p == 14 || p == 1) isslip = 0;																//If link -> edge, do bounceback
+					if ( p == 14 || p == 1) isslip = 0;														//If link -> edge, do bounceback
 				}
-				else if ( jc == 1 ){																								//Bottom left & right edges
+				else if ( jc == 1 ){																						//Bottom left & right edges
 					jc2 = jc1;
 					kc2 = kc;
 					if ( p == 18 || p == 5 ) isslip = 0;
 				}
-				else if ( kc == nlocal[Z] ){																				//Front left & right edges
+				else if ( kc == nlocal[Z] ){																		//Front left & right edges
 					jc2 = jc;
 					kc2 = kc1;
 					if ( p == 15 || p == 2) isslip = 0;
 				}
-				else if ( kc == 1 ){																								//Back left & right edges
+				else if ( kc == 1 ){																						//Back left & right edges
 					jc2 = jc;
 					kc2 = kc1;
 					if ( p == 17 || p == 4 ) isslip = 0;
 				}
 
+				/* Accounting for PBCs in perfect slip on x-walls by reverting back to slip conditions at PBC-slip wall edges*/
 				if ( wall->param->isboundary[Y] == 0 ){															//y-walls are PBC
 					if ( ( jc == 1 || jc == nlocal[Y] ) && ( kc > 1 && kc < nlocal[Z] ) ) isslip = 1;
 				}
@@ -396,11 +403,11 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 					if ( ( kc == 1 || kc == nlocal[Z] ) && ( jc > 1 && jc < nlocal[Y] ) ) isslip = 1;
 				}
 			}
-
+			/* Redefining ic2, jc2, kc2 for perfect-slip on walls in the y-direction */
 			if ( wall->param->isslip[1] && ( jc == 1 || jc == nlocal[Y] ) ){			//Perfect slip on y-walls
 				isslip = 2;
-				if ( jc == 1 ) jc2 = 0;																							//Set jc2 for BOTTOM WALL
-				else if ( jc == nlocal[Y] ) jc2 = nlocal[Y]+1;											//Set jc2 for TOP WALL
+				if ( jc == 1 ) jc2 = 0;																							//Set jc2 for bottom wall
+				else if ( jc == nlocal[Y] ) jc2 = nlocal[Y]+1;											//Set jc2 for top wall
 
 				if ( ic > 1 && ic < nlocal[X] && kc > 1 && kc < nlocal[Z] ){				//General case for non-edges on y-walls
 					ic2 = ic;
@@ -426,7 +433,7 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 					kc2 = kc1;
 					if ( p == 11 || p == 6 ) isslip = 0;
 				}
-
+				/* Accounting for PBCs in perfect slip on y-walls by reverting back to slip conditions at PBC-slip wall edges*/
 				if ( wall->param->isboundary[X] == 0 ){															//x-walls are PBC
 					if ( ( ic == 1 || ic == nlocal[X] ) && ( kc > 1 && kc < nlocal[Z] ) ) isslip = 2;
 				}
@@ -435,11 +442,11 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 					if ( ( kc == 1 || kc == nlocal[Z] ) && ( ic > 1 && ic < nlocal[X] ) ) isslip = 2;
 				}
 			}
-
+			/* Redefining ic2, jc2, kc2 for perfect-slip on walls in the y-direction */
 			if ( wall->param->isslip[2] && ( kc == 1 || kc == nlocal[Z] ) ){			//Perfect slip on z-walls
 				isslip = 3;
-				if ( kc == 1 ) kc2 = 0;																							//Set kc2 for BACK WALL
-				else if ( kc == nlocal[Z] ) kc2 = nlocal[Z] + 1;										//Set kc2 for FRONT WALL
+				if ( kc == 1 ) kc2 = 0;																							//Set kc2 for back wall
+				else if ( kc == nlocal[Z] ) kc2 = nlocal[Z] + 1;										//Set kc2 for front wall
 
 				if ( ic > 1 && ic < nlocal[X] && jc > 1 && jc < nlocal[Y] ){				//General case for non-edges on z-walls
 					ic2 = ic;
@@ -465,7 +472,7 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 					jc2 = jc1;
 					if ( p == 8 || p == 6 ) isslip = 0;
 				}
-
+				/* Accounting for PBCs in perfect slip on x-walls by reverting back to slip conditions at PBC-slip wall edges*/
 				if ( wall->param->isboundary[X] == 0 ){															//x-walls are PBC
 					if ( ( ic == 1 || ic == nlocal[X] ) && ( jc > 1 && jc < nlocal[Y] ) ) isslip = 3;
 				}
@@ -475,14 +482,15 @@ __host__ int wall_init_boundaries(wall_t * wall, wall_init_enum_t init) {
 				}
 			}
 
-			indexj = cs_index(wall->cs, ic2, jc2, kc2);
+			indexj = cs_index(wall->cs, ic2, jc2, kc2);		//Calculating new solid site index j via ic2, jc2, kc2 (default no-slip ic2 = ic1 etc.)
 
+			/*Setting site indices i and j to linki and linkj respectively. Setting vector p and linkp, wall velocity and flag for perfect-slip condition */
 	    if (init == WALL_INIT_ALLOCATE) {
 	      wall->linki[nlink] = indexi;
 	      wall->linkj[nlink] = indexj;
 	      wall->linkp[nlink] = p;
 	      wall->linku[nlink] = WALL_UZERO;
-				wall->links[nlink] = isslip;							/*RYAN EDIT*/
+				wall->links[nlink] = isslip;
 	    }
 	    nlink += 1;
 	  }
@@ -545,7 +553,7 @@ __host__ int wall_memcpy(wall_t * wall, int flag) {
       copyToTarget(tmp, wall->linku, nlink*sizeof(int));
 
 			copyFromTarget(&tmp, &wall->target->links, sizeof(int *));
-      copyToTarget(tmp, wall->links, nlink*sizeof(int));					/*RYAN EDIT*/
+      copyToTarget(tmp, wall->links, nlink*sizeof(int));
       break;
     case cudaMemcpyDeviceToHost:
       assert(0); /* Not required */
@@ -745,88 +753,89 @@ __global__ void wall_bbl_kernel(wall_t * wall, lb_t * lb, map_t * map) {
 
     __target_simt_for(n, wall->nlink, 1) {
 
-      int i, j, ij, ji, ia, is;
+      int i, j, ij, ji, ia, is, jk;
       int status;
       double rho, cdotu;
       double fp, fp0, fp1;
       double force;
 
-      i  = wall->linki[n];
-      j  = wall->linkj[n];
-      ij = wall->linkp[n];   /* Link index direction solid->fluid */
-      ia = wall->linku[n];   /* Wall velocity lookup */
+      i  = wall->linki[n];		/* Original fluid site i */
+      j  = wall->linkj[n];		/* Intermediate solid site j */
+	//Target fluid site is k (for bounceback k = i) -- never need to know k
+      ij = wall->linkp[n];   	/* Link index direction solid->fluid */
+      ia = wall->linku[n];   	/* Wall velocity lookup */
 			is = wall->links[n];
-			ji = NVEL - ij;        /* Opposite direction index */
+			ji = NVEL - ij;        	/* Opposite direction index */
 
-			if (is == 1){																								/*x-perfect slip condition*/
-				if (ij == 1 || ij == 2 || ij == 4 || ij == 5) ji = ij+13;
-				else if (ij == 14|| ij == 15|| ij == 17|| ij == 18) ji = ij-13;
+			/* Calculating new link between solid and target fluid node */
+			jk = ji;																												/* Link between solid to target fluid site - if bounceback then jk = ji*/
+			if (is == 1){																										/*x-perfect slip condition*/
+				if (ij == 1 || ij == 2 || ij == 4 || ij == 5) jk = ij+13;
+				else if (ij == 14|| ij == 15|| ij == 17|| ij == 18) jk = ij-13;
 			}
 			else if (is == 2){																							/*y-perfect slip condition*/
-				if (ij == 6 || ij == 8) ji = ij+5;
-				else if (ij == 11 || ij == 13) ji = ij-5;
-				else if (ij == 1 || ij == 14) ji = ij+4;
-				else if (ij == 5 || ij == 18) ji = ij-4;
+				if (ij == 6 || ij == 8) jk = ij+5;
+				else if (ij == 11 || ij == 13) jk = ij-5;
+				else if (ij == 1 || ij == 14) jk = ij+4;
+				else if (ij == 5 || ij == 18) jk = ij-4;
 			}
 			else if (is == 3){																							/*z-perfect slip condition*/
-				if (ij == 2|| ij == 6|| ij == 11|| ij == 15) ji = ij+2;
-				else if (ij == 4|| ij == 8|| ij == 13|| ij == 17) ji = ij-2;
+				if (ij == 2|| ij == 6|| ij == 11|| ij == 15) jk = ij+2;
+				else if (ij == 4|| ij == 8|| ij == 13|| ij == 17) jk = ij-2;
 			}
 
+			/* Adjust for moving walls -- if stationary cdotu = 0 */
       cdotu = lb->param->cv[ij][X]*uw[ia][X] +
 	      			lb->param->cv[ij][Y]*uw[ia][Y] +
               lb->param->cv[ij][Z]*uw[ia][Z];
 
+			/* Determine if fluid node is adjacent to colloid or wall boundary */
       map_status(map, i, &status);
 
       if (status == MAP_COLLOID) {
+				/* This matches the momentum exchange in colloid BBL. */
+				/* This only affects the accounting (via anomaly, as below) */
+				lb_f(lb, i, ij, LB_RHO, &fp0);
+				lb_f(lb, j, ji, LB_RHO, &fp1);		/* Because of this, colloids limited to bounceback ONLY */
+				fp = fp0 + fp1;
 
-	/* This matches the momentum exchange in colloid BBL. */
-	/* This only affects the accounting (via anomaly, as below) */
-
-	lb_f(lb, i, ij, LB_RHO, &fp0);
-	lb_f(lb, j, ji, LB_RHO, &fp1);
-	fp = fp0 + fp1;
-
-	fx[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
-	fy[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
-	fz[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
+				fx[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
+				fy[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
+				fz[tid] += (fp - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
       }
       else {
 
-	/* This is the momentum. To prevent accumulation of round-off
-	 * in the running total (fnet_), we subtract the equilibrium
-	 * wv[ij]. This is ok for walls where there are exactly
-	 * equal and opposite links at each side of the system. */
+				/* This is the momentum. To prevent accumulation of round-off
+				 * in the running total (fnet_), we subtract the equilibrium
+				 * wv[ij]. This is ok for walls where there are exactly
+				 * equal and opposite links at each side of the system. */
 
-	lb_f(lb, i, ij, LB_RHO, &fp);
-	lb_0th_moment(lb, i, LB_RHO, &rho);
+				lb_f(lb, i, ij, LB_RHO, &fp);  //Gets distribution from origin fluid site i in direction ij
+				lb_0th_moment(lb, i, LB_RHO, &rho); //Gets density from origin fluid site i
 
-	force = 2.0*fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-	//force -= 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-	if (is == 0) {
-		//force -= 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-		//printf("-- made it to the no-slip walls --\n\n");
-		fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
-		fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
-		fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
-	}
-	else if (is == 1) fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
-	else if (is == 2) fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
-	else if (is == 3) fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
+				force = 2.0*fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+				if (is == 0) {
+					fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
+					fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
+					fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
+				}
+				else if (is == 1) fx[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][X];
+				else if (is == 2) fy[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Y];
+				else if (is == 3) fz[tid] += (force - 2.0*lb->param->wv[ij])*lb->param->cv[ij][Z];
+				fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
 
-	//else if (is == 3) fz[tid] += 0;
-	fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-	lb_f_set(lb, j, ji, LB_RHO, fp);
+				/* Setting distribution at intermediary solid site j in direction jk (where jk = ji for bounceback) */
+				lb_f_set(lb, j, jk, LB_RHO, fp);
 
-	if (lb->param->ndist > 1) {
-	  /* Order parameter */
-	  lb_f(lb, i, ij, LB_PHI, &fp);
-	  lb_0th_moment(lb, i, LB_PHI, &rho);
+				/* For multi-phase fluids */
+				if (lb->param->ndist > 1) {
+				  /* Order parameter */
+				  lb_f(lb, i, ij, LB_PHI, &fp);
+				  lb_0th_moment(lb, i, LB_PHI, &rho);
 
-	  fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
-	  lb_f_set(lb, j, ji, LB_PHI, fp);
-	}
+				  fp = fp - 2.0*rcs2*lb->param->wv[ij]*lb->param->rho0*cdotu;
+				  lb_f_set(lb, j, ji, LB_PHI, fp);
+				}
       }
       /* Next link */
     }
